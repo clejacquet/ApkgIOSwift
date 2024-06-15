@@ -148,7 +148,7 @@ public struct AnkiPackage {
     
     public static func parse(_ fileUrl: URL) throws -> AnkiPackage {
         let fileManager = FileManager()
-        let destinationUrl = fileManager.temporaryDirectory.appending(path: "apkg_contents")
+        let destinationUrl = fileManager.temporaryDirectory.appendingPathComponent("apkg_contents")
         
         do {
             try fileManager.removeItem(at: destinationUrl)
@@ -158,7 +158,7 @@ public struct AnkiPackage {
         
         try fileManager.unzipItem(at: fileUrl, to: destinationUrl)
         
-        let dbPath = destinationUrl.appending(path: "collection.anki21")
+        let dbPath = destinationUrl.appendingPathComponent("collection.anki21")
         
         let db = try Connection(dbPath.absoluteString)
         
@@ -240,7 +240,7 @@ public struct AnkiPackage {
             collections.append(AnkiCollection(decks: decksDict[i], noteModels: noteModelsDict[i]))
         }
         
-        let mediaData = try Data(contentsOf: destinationUrl.appending(path: "media"))
+        let mediaData = try Data(contentsOf: destinationUrl.appendingPathComponent("media"))
         let mediaMapping = try decoder.decode([String: String].self, from: mediaData)
         
         try fileManager.removeItem(at: destinationUrl)
