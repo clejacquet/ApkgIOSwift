@@ -14,9 +14,12 @@ Notes:
 
 Please check the test for how to use this package.
 
-## Planned features
+## Planned features and progress
 
- - Stream loading, necessary for loading large .apkg files without running out of memory.
- - Saving .apkg files.
- - Support older versions of .apkg files.
- - Better error reporting (currently, the possible errors and how they are reported back to the caller are unknown). 
+ - [ ] Stream loading, necessary for loading large .apkg files without running out of memory.
+ - [ ] Saving .apkg files.
+ - [x] Support multiple versions of .apkg files.
+     - `collection.anki21` supported
+     - `collection.anki2` supported
+ - [x] Better error reporting
+     - *Note: currently partial implementation, but no panic errors anymore*
