@@ -3,19 +3,33 @@ import ZIPFoundation
 import SQLite
 
 public enum ApkgError: Error {
-    case collectionDatabaseInvalid(info: String)
     case collectionDatabaseNotFound
-    case cardInvalid
-    case revlogInvalid
-    case noteModelJsonInvalid
-    case deckJsonInvalid
+    case cardTableInvalid(_ sqliteError: String)
+    case noteTableInvalid(_ sqliteError: String)
+    case revlogTableInvalid(_ sqliteError: String)
+    case noteModelTableInvalid(_ sqliteError: String)
+    case deckTableInvalid(_ sqliteError: String)
+    case noteModelJsonInvalid(_ jsonDecodeError: String)
+    case deckJsonInvalid(_ jsonDecodeError: String)
 }
 
 extension ApkgError: LocalizedError {
     public var errorDescription: String? {
         switch self {
-        case let .collectionDatabaseInvalid(info):
-            return "[ApkgError.collectionDatabaseInvalid]\n\(info)"
+        case let .cardTableInvalid(sqliteError):
+            return "[ApkgError.cardTableInvalid]\n\(sqliteError)"
+        case let .noteTableInvalid(sqliteError):
+            return "[ApkgError.noteTableInvalid]\n\(sqliteError)"
+        case let .revlogTableInvalid(sqliteError):
+            return "[ApkgError.revlogTableInvalid]\n\(sqliteError)"
+        case let .noteModelTableInvalid(sqliteError):
+            return "[ApkgError.noteModelTableInvalid]\n\(sqliteError)"
+        case let .deckTableInvalid(sqliteError):
+            return "[ApkgError.deckTableInvalid]\n\(sqliteError)"
+        case let .noteModelJsonInvalid(jsonDecodeError):
+            return "[ApkgError.noteModelJsonInvalid]\n\(jsonDecodeError)"
+        case let .deckJsonInvalid(jsonDecodeError):
+            return "[ApkgError.deckJsonInvalid]\n\(jsonDecodeError)"
         default:
             return self.localizedDescription
         }
@@ -30,7 +44,15 @@ func unwrapOrThrow<T>(_ valOpt: T?, err: Error) throws -> T {
     return val
 }
 
-public struct AnkiCard {
+public protocol AnkiIdentifiable {
+    var id: Int64 { get }
+}
+
+public func ankiListToDict<T: AnkiIdentifiable>(_ list: [T]) -> [Int64:T] {
+    return Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) })
+}
+
+public struct AnkiCard: AnkiIdentifiable {
     public init(id: Int64,
                 nid: Int64,
                 did: Int64,
@@ -52,8 +74,8 @@ public struct AnkiCard {
         self.mod = mod
         self.type = type
         self.queue = queue
-        self.due = due
         self.ivl = ivl
+        self.due = due
         self.factor = factor
         self.reps = reps
         self.lapses = lapses
@@ -77,7 +99,7 @@ public struct AnkiCard {
     public let flags: Int64
 }
 
-public struct AnkiNote {
+public struct AnkiNote: AnkiIdentifiable {
     public init(id: Int64, guid: String, mid: Int64, mod: Int64, flds: [String]) {
         self.id = id
         self.guid = guid
@@ -93,7 +115,7 @@ public struct AnkiNote {
     public let flds: [String]
 }
 
-public struct AnkiRevlog {
+public struct AnkiRevlog: AnkiIdentifiable {
     public let id: Int64
     public let cid: Int64
     public let ease: Int64
@@ -250,15 +272,22 @@ public struct AnkiNoteModelOld: Decodable {
     }
     
     public init(from decoder: Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try unwrapOrThrow(Int64(try values.decode(String.self, forKey: .id)), err: ApkgError.noteModelJsonInvalid)
-        self.name = try values.decode(String.self, forKey: .name)
-        self.mod = try values.decode(Int64.self, forKey: .mod)
-        self.css = try values.decode(String?.self, forKey: .css)
-        self.did = try values.decode(String?.self, forKey: .did).map { try unwrapOrThrow(Int64($0), err: ApkgError.noteModelJsonInvalid) }
-        self.flds = try values.decode([AnkiNoteField].self, forKey: .flds)
-        self.tmpls = try values.decode([AnkiNoteTemplate].self, forKey: .tmpls)
-        self.type = try values.decode(Int64.self, forKey: .type)
+        do {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            self.id = try unwrapOrThrow(Int64(try values.decode(String.self, forKey: .id)),
+                                        err: ApkgError.noteModelJsonInvalid("Old note \"id\" not convertible to Int64"))
+            self.name = try values.decode(String.self, forKey: .name)
+            self.mod = try values.decode(Int64.self, forKey: .mod)
+            self.css = try values.decode(String?.self, forKey: .css)
+            self.did = try values.decode(String?.self, forKey: .did).map {
+                try unwrapOrThrow(Int64($0), err: ApkgError.noteModelJsonInvalid("Old note \"did\" not convertible to Int64"))
+            }
+            self.flds = try values.decode([AnkiNoteField].self, forKey: .flds)
+            self.tmpls = try values.decode([AnkiNoteTemplate].self, forKey: .tmpls)
+            self.type = try values.decode(Int64.self, forKey: .type)
+        } catch {
+            throw ApkgError.noteModelJsonInvalid(error.localizedDescription)
+        }
     }
     
     public func toNew() -> AnkiNoteModel {
@@ -333,7 +362,7 @@ public struct AnkiPackage {
         return try noteModelsJson.map { noteModelJson in
             let noteModelEntry: [String: AnkiNoteModel]
             
-            let noteModelData = try unwrapOrThrow(noteModelJson.data(using: .utf8), err: ApkgError.noteModelJsonInvalid)
+            let noteModelData = try unwrapOrThrow(noteModelJson.data(using: .utf8), err: ApkgError.noteModelJsonInvalid("UTF8 parsing failed"))
             
             do {
                 if (is21) {
@@ -343,13 +372,13 @@ public struct AnkiPackage {
                     
                     noteModelEntry = Dictionary(uniqueKeysWithValues: noteModelEntryOld.map { ($0.key, $0.value.toNew()) })
                 }
-            } catch {
-                throw ApkgError.noteModelJsonInvalid
+            } catch let error {
+                throw ApkgError.noteModelJsonInvalid(error.localizedDescription)
             }
             
             return try Dictionary(uniqueKeysWithValues: noteModelEntry.map {
                 guard let intKey = Int64($0.key) else {
-                    throw ApkgError.noteModelJsonInvalid
+                    throw ApkgError.noteModelJsonInvalid("Note \"id\" not convertible to Int64")
                 }
                 
                 return (intKey, $0.value)
@@ -362,142 +391,158 @@ public struct AnkiPackage {
         
         return try decksJson.map { deckJson in
             guard let deckData = deckJson.data(using: .utf8) else {
-                throw ApkgError.deckJsonInvalid
+                throw ApkgError.deckJsonInvalid("UTF8 parsing failed")
             }
             
             do {
                 let deckDict = try decoder.decode([String: AnkiDeck].self, from: deckData)
                 return try Dictionary(uniqueKeysWithValues: deckDict.map {
                     guard let intKey = Int64($0.key) else {
-                        throw ApkgError.deckJsonInvalid
+                        throw ApkgError.deckJsonInvalid("Deck \"id\" not convertible to Int64")
                     }
                     
                     return (intKey, $0.value)
                 })
             } catch {
-                throw ApkgError.deckJsonInvalid
+                throw ApkgError.deckJsonInvalid(error.localizedDescription)
             }
         }
     }
     
-    static func parseNotes(_ db: Connection) throws -> [Int64: AnkiNote] {
-        // Verify the notes table is valid and contains the required columns with the correct types
-        let pragmaStatement = "PRAGMA table_info(notes);"
-        let pragmaQuery = try db.prepare(pragmaStatement)
-        
-        let expectedColumnDict = [
-            "id": "INTEGER",
-            "guid": "TEXT",
-            "mid": "INTEGER",
-            "mod": "INTEGER",
-            "flds": "TEXT"
-        ]
-        var correctColumnFound = Set<String>()
-        
-        // Iterate through the results
-        for row in pragmaQuery {
-            guard let columnName = row[1] as? String,
-                  let columnType = row[2] as? String else {
-                continue
-            }
+    static func parseNotes(_ db: Connection, length: Int64? = nil, offset: Int64? = nil) throws -> [AnkiNote] {
+        do {
+            let id = SQLite.Expression<Int64>("id")
+            let guid = SQLite.Expression<String>("guid")
+            let mid = SQLite.Expression<Int64>("mid")
+            let mod = SQLite.Expression<Int64>("mod")
+            let flds = SQLite.Expression<String>("flds")
             
-            if let expectedColumnType = expectedColumnDict[columnName], columnType == expectedColumnType {
-                correctColumnFound.insert(columnName)
-            }
-        }
-        
-        if correctColumnFound.count != expectedColumnDict.count {
-            var missingColumnErrorMsg = "Missing columns in the \"notes\" table: \n"
+            var notesQuery = Table("notes").select(id, guid, mid, mod, flds).order(id)
             
-            expectedColumnDict.forEach { columnName, columnType in
-                if !correctColumnFound.contains(columnName) {
-                    missingColumnErrorMsg += " > \(columnName) [type=\(columnType)]"
+            if let length = length {
+                if let offset = offset {
+                    notesQuery = notesQuery.limit(Int(length), offset: Int(offset))
+                } else {
+                    notesQuery = notesQuery.limit(Int(length))
                 }
             }
             
-            throw ApkgError.collectionDatabaseInvalid(info: missingColumnErrorMsg)
+            return try db.prepareRowIterator(notesQuery).map { row in
+                let fldsStr = row[flds]
+                let separator = String(UnicodeScalar(0x1f))
+                let fldsList = fldsStr.components(separatedBy: separator)
+                
+                return AnkiNote(id: row[id], guid: row[guid], mid: row[mid], mod: row[mod], flds: fldsList)
+            }
+        } catch {
+            throw ApkgError.noteTableInvalid(error.localizedDescription)
         }
-        
-        let notes = try db.prepare("SELECT id, guid, mid, mod, flds FROM notes").map { row in
-            let id = try unwrapOrThrow(row[0] as? Int64, err: ApkgError.collectionDatabaseInvalid(info: "id invalid"))
-            let guid = try unwrapOrThrow(row[1] as? String, err: ApkgError.collectionDatabaseInvalid(info: "guid invalid"))
-            let mid = try unwrapOrThrow(row[2] as? Int64, err: ApkgError.collectionDatabaseInvalid(info: "mid invalid"))
-            let mod = try unwrapOrThrow(row[3] as? Int64, err: ApkgError.collectionDatabaseInvalid(info: "mod invalid"))
-            let fldsStr = try unwrapOrThrow(row[4] as? String, err: ApkgError.collectionDatabaseInvalid(info: "flds invalid"))
-            let separator = String(UnicodeScalar(0x1f))
-            let flds = fldsStr.components(separatedBy: separator)
-            
-            return AnkiNote(id: id, guid: guid, mid: mid, mod: mod, flds: flds)
-        }
-        
-        return Dictionary(uniqueKeysWithValues: notes.map { ($0.id, $0) })
     }
     
-    static func parseCards(_ db: Connection) throws -> [Int64: AnkiCard] {
-        let selectQuery = "SELECT id, nid, did, ord, mod, type, queue, due, ivl, factor, reps, lapses, left, flags FROM cards"
-        
-        let cards = try db.prepare(selectQuery).map { row in
-            let id = try unwrapOrThrow(row[0] as? Int64, err: ApkgError.cardInvalid)
-            let nid = try unwrapOrThrow(row[1] as? Int64, err: ApkgError.cardInvalid)
-            let did = try unwrapOrThrow(row[2] as? Int64, err: ApkgError.cardInvalid)
-            let ord = try unwrapOrThrow(row[3] as? Int64, err: ApkgError.cardInvalid)
-            let mod = try unwrapOrThrow(row[4] as? Int64, err: ApkgError.cardInvalid)
-            let type = try unwrapOrThrow(row[5] as? Int64, err: ApkgError.cardInvalid)
-            let queue = try unwrapOrThrow(row[6] as? Int64, err: ApkgError.cardInvalid)
-            let due = try unwrapOrThrow(row[7] as? Int64, err: ApkgError.cardInvalid)
-            let ivl = try unwrapOrThrow(row[8] as? Int64, err: ApkgError.cardInvalid)
-            let factor = try unwrapOrThrow(row[9] as? Int64, err: ApkgError.cardInvalid)
-            let reps = try unwrapOrThrow(row[10] as? Int64, err: ApkgError.cardInvalid)
-            let lapses = try unwrapOrThrow(row[11] as? Int64, err: ApkgError.cardInvalid)
-            let left = try unwrapOrThrow(row[12] as? Int64, err: ApkgError.cardInvalid)
-            let flags = try unwrapOrThrow(row[13] as? Int64, err: ApkgError.cardInvalid)
+    static func parseCards(_ db: Connection, length: Int64? = nil, offset: Int64? = nil) throws -> [AnkiCard] {
+        do {
+            let id = SQLite.Expression<Int64>("id")
+            let nid = SQLite.Expression<Int64>("nid")
+            let did = SQLite.Expression<Int64>("did")
+            let ord = SQLite.Expression<Int64>("ord")
+            let mod = SQLite.Expression<Int64>("mod")
+            let type = SQLite.Expression<Int64>("type")
+            let queue = SQLite.Expression<Int64>("queue")
+            let due = SQLite.Expression<Int64>("due")
+            let ivl = SQLite.Expression<Int64>("ivl")
+            let factor = SQLite.Expression<Int64>("factor")
+            let reps = SQLite.Expression<Int64>("reps")
+            let lapses = SQLite.Expression<Int64>("lapses")
+            let left = SQLite.Expression<Int64>("left")
+            let flags = SQLite.Expression<Int64>("flags")
             
-            return AnkiCard(
-                id: id,
-                nid: nid,
-                did: did,
-                ord: ord,
-                mod: mod,
-                type: type,
-                queue: queue,
-                due: due,
-                ivl: ivl,
-                factor: factor,
-                reps: reps,
-                lapses: lapses,
-                left: left,
-                flags: flags)
+            var cardsQuery = Table("cards")
+                    .select(id, nid, did, ord, mod, type, queue, due, ivl, factor, reps, lapses, left, flags)
+                    .order(id)
+            
+            if let length = length {
+                if let offset = offset {
+                    cardsQuery = cardsQuery.limit(Int(length), offset: Int(offset))
+                } else {
+                    cardsQuery = cardsQuery.limit(Int(length))
+                }
+            }
+            
+            return try db.prepareRowIterator(cardsQuery).map { row in
+                return AnkiCard(
+                    id: row[id],
+                    nid: row[nid],
+                    did: row[did],
+                    ord: row[ord],
+                    mod: row[mod],
+                    type: row[type],
+                    queue: row[queue],
+                    due: row[due],
+                    ivl: row[ivl],
+                    factor: row[factor],
+                    reps: row[reps],
+                    lapses: row[lapses],
+                    left: row[left],
+                    flags: row[flags])
+            }
+        } catch {
+            throw ApkgError.cardTableInvalid(error.localizedDescription)
         }
-        
-        return Dictionary(uniqueKeysWithValues: cards.map { ($0.id, $0) })
     }
     
-    static func parseRevlog(_ db: Connection) throws -> [Int64: AnkiRevlog] {
-        let revlog = try db.prepare("SELECT id, cid, ease, ivl, lastIvl, factor, time, type FROM revlog").map { row in
-            let id = try unwrapOrThrow(row[0] as? Int64, err: ApkgError.revlogInvalid)
-            let cid = try unwrapOrThrow(row[1] as? Int64, err: ApkgError.revlogInvalid)
-            let ease = try unwrapOrThrow(row[2] as? Int64, err: ApkgError.revlogInvalid)
-            let ivl = try unwrapOrThrow(row[3] as? Int64, err: ApkgError.revlogInvalid)
-            let lastIvl = try unwrapOrThrow(row[4] as? Int64, err: ApkgError.revlogInvalid)
-            let factor = try unwrapOrThrow(row[5] as? Int64, err: ApkgError.revlogInvalid)
-            let time = try unwrapOrThrow(row[6] as? Int64, err: ApkgError.revlogInvalid)
-            let type = try unwrapOrThrow(row[7] as? Int64, err: ApkgError.revlogInvalid)
+    static func parseRevlog(_ db: Connection, length: Int64? = nil, offset: Int64? = nil) throws -> [AnkiRevlog] {
+        do {
+            let id = SQLite.Expression<Int64>("id")
+            let cid = SQLite.Expression<Int64>("cid")
+            let ease = SQLite.Expression<Int64>("ease")
+            let ivl = SQLite.Expression<Int64>("ivl")
+            let lastIvl = SQLite.Expression<Int64>("lastIvl")
+            let factor = SQLite.Expression<Int64>("factor")
+            let time = SQLite.Expression<Int64>("time")
+            let type = SQLite.Expression<Int64>("type")
             
-            return AnkiRevlog(id: id, cid: cid, ease: ease, ivl: ivl, lastIvl: lastIvl, factor: factor, time: time, type: type)
+            var revlogQuery = Table("revlog").select(id, cid, ease, ivl, lastIvl, factor, time, type).order(id)
+            
+            if let length = length {
+                if let offset = offset {
+                    revlogQuery = revlogQuery.limit(Int(length), offset: Int(offset))
+                } else {
+                    revlogQuery = revlogQuery.limit(Int(length))
+                }
+            }
+            
+            return try db.prepareRowIterator(revlogQuery).map { row in
+                return AnkiRevlog(
+                    id: row[id],
+                    cid: row[cid],
+                    ease: row[ease],
+                    ivl: row[ivl],
+                    lastIvl: row[lastIvl],
+                    factor: row[factor],
+                    time: row[time],
+                    type: row[type])
+            }
+        } catch {
+            throw ApkgError.revlogTableInvalid(error.localizedDescription)
         }
-        
-        return Dictionary(uniqueKeysWithValues: revlog.map { ($0.id, $0) })
     }
     
     static func parseCollections(_ db: Connection, is21: Bool) throws -> [AnkiCollection] {
-        let colQuery = try db.prepare("SELECT models, decks FROM col")
+        let models = SQLite.Expression<String>("models")
+        let decks = SQLite.Expression<String>("decks")
         
-        let noteModelsJson = try colQuery.map { row in
-            try unwrapOrThrow(row[0] as? String, err: ApkgError.collectionDatabaseInvalid(info: "invalid noteModels column type"))
+        let noteModelsJson: [String]
+        do {
+            noteModelsJson = try db.prepareRowIterator(Table("col").select(models)).map { $0[models] }
+        } catch {
+            throw ApkgError.noteTableInvalid(error.localizedDescription)
         }
         
-        let decksJson = try colQuery.map { row in
-            try unwrapOrThrow(row[1] as? String, err: ApkgError.collectionDatabaseInvalid(info: "invalid decks column type"))
+        let decksJson: [String]
+        do {
+            decksJson = try db.prepareRowIterator(Table("col").select(decks)).map { $0[decks] }
+        } catch {
+            throw ApkgError.deckTableInvalid(error.localizedDescription)
         }
         
         let colCount = noteModelsJson.count
@@ -552,13 +597,52 @@ public struct AnkiPackage {
         let db = try Connection(dbPath.absoluteString)
         
         let collections = try parseCollections(db, is21: is21)
-        let notesDict = try parseNotes(db)
-        let cardsDict = try parseCards(db)
-        let revlogDict = try parseRevlog(db)
+        let notes = try parseNotes(db)
+        let cards = try parseCards(db)
+        let revlog = try parseRevlog(db)
         let mediaMapping = try parseMediaMapping(workDir)
         
         try fileManager.removeItem(at: workDir)
         
-        return AnkiPackage(collections: collections, notes: notesDict, cards: cardsDict, revlog: revlogDict, mediaMapping: mediaMapping)
+        return AnkiPackage(collections: collections,
+                           notes: ankiListToDict(notes),
+                           cards: ankiListToDict(cards),
+                           revlog: ankiListToDict(revlog),
+                           mediaMapping: mediaMapping)
+    }
+    
+    public static func streamReader(_ fileUrl: URL) throws -> AnkiStreamReader {
+        let fileManager = FileManager()
+        let workDir = fileManager.temporaryDirectory.appendingPathComponent("apkg_contents")
+        
+        // Erase any workdir remaining after a previous import
+        do {
+            try fileManager.removeItem(at: workDir)
+        } catch {
+            // Do nothing
+        }
+        
+        try fileManager.unzipItem(at: fileUrl, to: workDir)
+        
+        var dbPath = workDir.appendingPathComponent("collection.anki21")
+        var is21 = true
+        
+        // Check if an old version of the collection database exists
+        if !fileManager.fileExists(atPath: dbPath.path) {
+            dbPath = workDir.appendingPathComponent("collection.anki2")
+            is21 = false
+        }
+        
+        // No collection database found
+        if !fileManager.fileExists(atPath: dbPath.path) {
+            throw ApkgError.collectionDatabaseNotFound
+        }
+        
+        let db = try Connection(dbPath.absoluteString)
+        
+        let collections = try parseCollections(db, is21: is21)
+        let mediaMapping = try parseMediaMapping(workDir)
+        
+        return try AnkiStreamReader(db: db, collections: collections, mediaMapping: mediaMapping)
     }
 }
