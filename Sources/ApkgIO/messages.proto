@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+message MediaEntries {
+  message MediaEntry {
+    string name = 1;
+    uint32 size = 2;
+    bytes sha1 = 3;
+    optional uint32 legacy_zip_filename = 255;
+  }
+
+  repeated MediaEntry entries = 1;
+}
+
+message Config {
+  string q_format = 1;
+  string a_format = 2;
+  string q_format_browser = 3;
+  string a_format_browser = 4;
+  int64 target_deck_id = 5;
+  string browser_font_name = 6;
+  uint32 browser_font_size = 7;
+  // used for merging notetypes on import (Anki 23.10)
+  optional int64 id = 8;
+
+  bytes other = 255;
+}
