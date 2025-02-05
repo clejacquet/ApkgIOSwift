@@ -1,6 +1,7 @@
 import Foundation
 import ZIPFoundation
 import SQLite
+import libzstd
 
 public enum ApkgError: Error {
     case collectionDatabaseNotFound
@@ -180,7 +181,7 @@ public struct AnkiNoteTemplate: Decodable {
     }
 }
 
-public struct AnkiNoteModel: Decodable {
+public final class AnkiNoteModel: Decodable {
     enum CodingKeys: String, CodingKey {
         case id
         case name
@@ -197,8 +198,8 @@ public struct AnkiNoteModel: Decodable {
     public let mod: Int64
     public let css: String?
     public let did: Int64?
-    public let flds: [AnkiNoteField]
-    public let tmpls: [AnkiNoteTemplate]
+    public var flds: [AnkiNoteField]
+    public var tmpls: [AnkiNoteTemplate]
     public let type: Int64
     
     public init(id: Int64,
@@ -302,6 +303,12 @@ public struct AnkiNoteModelOld: Decodable {
     }
 }
 
+enum AnkiPackageFormat: String {
+    case anki2 = "collection.anki2"
+    case anki21 = "collection.anki21"
+    case anki21b = "collection.anki21b"
+}
+
 public struct AnkiDeck: Decodable {
     enum CodingKeys: String, CodingKey {
         case id
@@ -356,7 +363,7 @@ public struct AnkiPackage {
         self.mediaMapping = mediaMapping
     }
     
-    static func parseNoteModels(_ noteModelsJson: [String], is21: Bool) throws -> [[Int64: AnkiNoteModel]] {
+    static func parseNoteModelsOld(_ noteModelsJson: [String], is21: Bool) throws -> [[Int64: AnkiNoteModel]] {
         let decoder = JSONDecoder()
         
         return try noteModelsJson.map { noteModelJson in
@@ -386,7 +393,67 @@ public struct AnkiPackage {
         }
     }
     
-    static func parseDecks(_ decksJson: [String]) throws -> [[Int64: AnkiDeck]] {
+    static func parseNoteModels(_ db: Connection) throws -> [Int64: AnkiNoteModel] {
+        var ankiNoteModels = [Int64: AnkiNoteModel]()
+        
+        let notetypesTable = Table("notetypes")
+        let fieldsTable = Table("fields")
+        let templatesTable = Table("templates")
+        
+        let notetypesId = SQLite.Expression<Int64>("id")
+        let notetypesName = SQLite.Expression<String>("name")
+        let notetypesMod = SQLite.Expression<Int64>("mtime_secs")
+        let fieldsNtid = SQLite.Expression<Int64>("ntid")
+        let fieldsOrd = SQLite.Expression<Int64>("ord")
+        let fieldsName = SQLite.Expression<String>("name")
+        let templatesConfig = SQLite.Expression<Data>("config")
+        
+        let noteModelFieldsQuery = notetypesTable
+            .join(fieldsTable, on: notetypesTable[notetypesId] == fieldsTable[fieldsNtid])
+            .select(notetypesTable[notetypesId], notetypesTable[notetypesName], notetypesTable[notetypesMod], fieldsTable[fieldsName], fieldsTable[fieldsOrd])
+        
+        for row in try db.prepare(noteModelFieldsQuery) {
+            let notetypesIdVal = row[notetypesTable[notetypesId]]
+            let notetypesNameVal = row[notetypesTable[notetypesName]]
+            let notetypesModVal = row[notetypesTable[notetypesMod]]
+            let fieldsNameVal = row[fieldsTable[fieldsName]]
+            let fieldsOrdVal = row[fieldsTable[fieldsOrd]]
+            
+            if let noteModel = ankiNoteModels[notetypesIdVal] {
+                noteModel.flds.append(AnkiNoteField(ord: fieldsOrdVal, name: fieldsNameVal))
+            } else {
+                ankiNoteModels[notetypesIdVal] = AnkiNoteModel(id: notetypesIdVal, name: notetypesNameVal, mod: notetypesModVal, css: nil, did: nil, flds: [], tmpls: [], type: 0)
+                ankiNoteModels[notetypesIdVal]!.flds.append(AnkiNoteField(ord: fieldsOrdVal, name: fieldsNameVal))
+            }
+        }
+        
+        let noteModelTemplatesQuery = notetypesTable
+            .join(templatesTable, on: notetypesTable[notetypesId] == templatesTable[fieldsNtid])
+            .select(notetypesTable[notetypesId], notetypesTable[notetypesName], notetypesTable[notetypesMod], templatesTable[fieldsOrd], templatesTable[fieldsName], templatesTable[templatesConfig])
+        
+        for row in try db.prepare(noteModelTemplatesQuery) {
+            let notetypesIdVal = row[notetypesTable[notetypesId]]
+            let notetypesNameVal = row[notetypesTable[notetypesName]]
+            let notetypesModVal = row[notetypesTable[notetypesMod]]
+            
+            let templatesNameVal = row[templatesTable[fieldsName]]
+            let templatesOrdVal = row[templatesTable[fieldsOrd]]
+            let templatesConfigVal = row[templatesTable[templatesConfig]]
+            
+            let config = try Config(serializedBytes: templatesConfigVal)
+            
+            if let noteModel = ankiNoteModels[notetypesIdVal] {
+                noteModel.tmpls.append(AnkiNoteTemplate(ord: templatesOrdVal, name: templatesNameVal, qfmt: config.qFormat, afmt: config.aFormat))
+            } else {
+                ankiNoteModels[notetypesIdVal] = AnkiNoteModel(id: notetypesIdVal, name: notetypesNameVal, mod: notetypesModVal, css: nil, did: nil, flds: [], tmpls: [], type: 0)
+                ankiNoteModels[notetypesIdVal]!.tmpls.append(AnkiNoteTemplate(ord: templatesOrdVal, name: templatesNameVal, qfmt: config.qFormat, afmt: config.aFormat))
+            }
+        }
+        
+        return ankiNoteModels
+    }
+    
+    static func parseDecksOld(_ decksJson: [String]) throws -> [[Int64: AnkiDeck]] {
         let decoder = JSONDecoder()
         
         return try decksJson.map { deckJson in
@@ -407,6 +474,18 @@ public struct AnkiPackage {
                 throw ApkgError.deckJsonInvalid(error.localizedDescription)
             }
         }
+    }
+    
+    static func parseDecks(_ db: Connection) throws -> [Int64: AnkiDeck] {
+        let id = SQLite.Expression<Int64>("id")
+        let name = SQLite.Expression<String>("name")
+        let mtime_secs = SQLite.Expression<Int64>("mtime_secs")
+        
+        let decksQuery = Table("decks").select(id, name, mtime_secs).order(id)
+        
+        return try Dictionary(uniqueKeysWithValues: db.prepareRowIterator(decksQuery).map { row in
+            return (row[id], AnkiDeck(id: row[id], name: row[name], mod: row[mtime_secs], desc: ""))
+        })
     }
     
     static func parseNotes(_ db: Connection, length: Int64? = nil, offset: Int64? = nil) throws -> [AnkiNote] {
@@ -457,8 +536,8 @@ public struct AnkiPackage {
             let flags = SQLite.Expression<Int64>("flags")
             
             var cardsQuery = Table("cards")
-                    .select(id, nid, did, ord, mod, type, queue, due, ivl, factor, reps, lapses, left, flags)
-                    .order(id)
+                .select(id, nid, did, ord, mod, type, queue, due, ivl, factor, reps, lapses, left, flags)
+                .order(id)
             
             if let length = length {
                 if let offset = offset {
@@ -527,10 +606,8 @@ public struct AnkiPackage {
         }
     }
     
-    static func parseCollections(_ db: Connection, is21: Bool) throws -> [AnkiCollection] {
+    static func parseCollectionsOld(_ db: Connection, is21: Bool) throws -> [AnkiCollection] {
         let models = SQLite.Expression<String>("models")
-        let decks = SQLite.Expression<String>("decks")
-        
         let noteModelsJson: [String]
         do {
             noteModelsJson = try db.prepareRowIterator(Table("col").select(models)).map { $0[models] }
@@ -538,6 +615,7 @@ public struct AnkiPackage {
             throw ApkgError.noteTableInvalid(error.localizedDescription)
         }
         
+        let decks = SQLite.Expression<String>("decks")
         let decksJson: [String]
         do {
             decksJson = try db.prepareRowIterator(Table("col").select(decks)).map { $0[decks] }
@@ -548,8 +626,8 @@ public struct AnkiPackage {
         let colCount = noteModelsJson.count
         var collections = [AnkiCollection]()
         
-        let noteModelsDict = try parseNoteModels(noteModelsJson, is21: is21)
-        let decksDict = try parseDecks(decksJson)
+        let noteModelsDict = try parseNoteModelsOld(noteModelsJson, is21: is21)
+        let decksDict = try parseDecksOld(decksJson)
         
         for i in 0..<colCount {
             collections.append(AnkiCollection(decks: decksDict[i], noteModels: noteModelsDict[i]))
@@ -558,13 +636,164 @@ public struct AnkiPackage {
         return collections
     }
     
-    static func parseMediaMapping(_ workDir: URL) throws -> [String: String] {
-        let mediaData = try Data(contentsOf: workDir.appendingPathComponent("media"))
+    static func unicaseCollation(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        return lhs.compare(rhs, options: .caseInsensitive)
+    }
+    
+    static func parseCollections21b(_ db: Connection) throws -> [AnkiCollection] {
+        let noteModels = try parseNoteModels(db)
+        let decks = try parseDecks(db)
         
-        let decoder = JSONDecoder()
-        let mediaMapping = try decoder.decode([String: String].self, from: mediaData)
+        return [AnkiCollection(decks: decks, noteModels: noteModels)]
+    }
+    
+    static func parseCollections(_ db: Connection, format: AnkiPackageFormat) throws -> [AnkiCollection] {
+        try db.createCollation("unicase", unicaseCollation)
         
-        return mediaMapping
+        switch format {
+        case .anki2: return try parseCollectionsOld(db, is21: false)
+        case .anki21: return try parseCollectionsOld(db, is21: true)
+        case .anki21b: return try parseCollections21b(db)
+        }
+    }
+    
+    static func parseMediaMapping(_ workDir: URL, format: AnkiPackageFormat) throws -> [String: String] {
+        if format != .anki21b {
+            let mediaData = try Data(contentsOf: workDir.appendingPathComponent("media"))
+            let decoder = JSONDecoder()
+            return try decoder.decode([String: String].self, from: mediaData)
+        } else {
+            try decompressZstdFile(atPath: workDir.appendingPathComponent("media"), toDestination: workDir.appendingPathComponent("media_dec"))
+            let mediaData = try Data(contentsOf: workDir.appendingPathComponent("media_dec"))
+            
+            let mediaEntries = try MediaEntries(serializedBytes: mediaData)
+            
+            return Dictionary(uniqueKeysWithValues: mediaEntries.entries.enumerated().map {
+                if $1.hasLegacyZipFilename {
+                    return (String($1.legacyZipFilename), $1.name)
+                } else {
+                    return (String($0), $1.name)
+                }
+            })
+        }
+    }
+    
+    static func findPackageFormat(_ workDir: URL) -> AnkiPackageFormat? {
+        let fileManager = FileManager()
+        
+        var dbPath = workDir.appendingPathComponent(AnkiPackageFormat.anki21b.rawValue)
+        if fileManager.fileExists(atPath: dbPath.path) {
+            return .anki21b
+        }
+        
+        dbPath = workDir.appendingPathComponent(AnkiPackageFormat.anki21.rawValue)
+        if fileManager.fileExists(atPath: dbPath.path) {
+            return .anki21
+        }
+        
+        dbPath = workDir.appendingPathComponent(AnkiPackageFormat.anki2.rawValue)
+        if fileManager.fileExists(atPath: dbPath.path) {
+            return .anki2
+        }
+        
+        return nil
+    }
+    
+    static func decompressZstdFile(atPath path: URL, toDestination destinationPath: URL) throws {
+        // Read the compressed data from the file
+        let compressedData = try Data(contentsOf: path)
+        
+        // Get the decompressed size from the frame header
+        var decompressedSize: CUnsignedLongLong = 0
+        try compressedData.withUnsafeBytes {
+            decompressedSize = ZSTD_getFrameContentSize($0.baseAddress, $0.count)
+            guard decompressedSize != ZSTD_CONTENTSIZE_ERROR else {
+                throw NSError(domain: "ZSTDError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid compressed data"])
+            }
+        }
+        
+        if (decompressedSize != ZSTD_CONTENTSIZE_UNKNOWN) {
+            // Allocate a buffer for the decompressed data
+            var decompressedData = Data(count: Int(decompressedSize))
+            
+            // Decompress the data
+            let result = decompressedData.withUnsafeMutableBytes { decompressedBuffer in
+                compressedData.withUnsafeBytes { compressedBuffer in
+                    ZSTD_decompress(decompressedBuffer.baseAddress, Int(decompressedSize), compressedBuffer.baseAddress, compressedData.count)
+                }
+            }
+            // Check if decompression was successful
+            guard result == decompressedSize else {
+                throw NSError(domain: "ZSTDError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Decompression failed"])
+            }
+            
+            // Write the decompressed data to the destination file
+            try decompressedData.write(to: destinationPath)
+        } else {
+            var decompressedData = Data()
+            
+            // Define the input and output buffer sizes
+            let inputBufferSize = 1024 * 1024 // 1 MB
+            let outputBufferSize = ZSTD_DStreamOutSize()
+            
+            // Allocate input and output buffers
+            var inputBuffer = Data(count: inputBufferSize)
+            var outputBuffer = Data(count: outputBufferSize)
+            
+            // Initialize the decompression stream
+            var stream = ZSTD_inBuffer()
+            var remainingData = compressedData
+            
+            let dctx = ZSTD_createDCtx();
+            
+            while !remainingData.isEmpty {
+                // Fill the input buffer
+                let chunkSize = min(inputBufferSize, remainingData.count)
+                inputBuffer.replaceSubrange(0..<chunkSize, with: remainingData.subdata(in: 0..<chunkSize))
+                remainingData.removeSubrange(0..<chunkSize)
+                
+                stream.src = inputBuffer.withUnsafeBytes { $0.baseAddress }
+                stream.size = chunkSize
+                stream.pos = 0
+                
+                // Decompress the data in chunks
+                while stream.pos < stream.size {
+                    var outStream = ZSTD_outBuffer()
+                    outStream.dst = outputBuffer.withUnsafeMutableBytes { $0.baseAddress }
+                    outStream.size = outputBufferSize
+                    outStream.pos = 0
+                    
+                    let result = ZSTD_decompressStream(dctx, &outStream, &stream)
+                    guard result >= 0 else {
+                        throw NSError(domain: "ZSTDError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Decompression failed"])
+                    }
+                    
+                    // Append the decompressed chunk to the result
+                    decompressedData.append(outputBuffer.subdata(in: 0..<outStream.pos))
+                }
+            }
+            
+            // Write the decompressed data to the destination file
+            try decompressedData.write(to: destinationPath)
+        }
+    }
+    
+    
+    static func extractDb(_ fileUrl: URL, workDir: URL, fileManager: FileManager) throws -> (Connection, AnkiPackageFormat) {
+        try fileManager.unzipItem(at: fileUrl, to: workDir)
+        
+        guard let format = findPackageFormat(workDir) else {
+            throw ApkgError.collectionDatabaseNotFound
+        }
+        
+        if format == .anki21b {
+            let decompressed_db_path = workDir.appendingPathComponent("collection.anki21b_dec")
+            try decompressZstdFile(atPath: workDir.appendingPathComponent(AnkiPackageFormat.anki21b.rawValue), toDestination: decompressed_db_path)
+            
+            return try (Connection(decompressed_db_path.absoluteString), format)
+        } else {
+            return try (Connection(workDir.appendingPathComponent(format.rawValue).absoluteString), format)
+        }
     }
     
     public static func parse(_ fileUrl: URL) throws -> AnkiPackage {
@@ -578,29 +807,13 @@ public struct AnkiPackage {
             // Do nothing
         }
         
-        try fileManager.unzipItem(at: fileUrl, to: workDir)
+        let (db, format) = try extractDb(fileUrl, workDir: workDir, fileManager: fileManager)
         
-        var dbPath = workDir.appendingPathComponent("collection.anki21")
-        var is21 = true
-        
-        // Check if an old version of the collection database exists
-        if !fileManager.fileExists(atPath: dbPath.path) {
-            dbPath = workDir.appendingPathComponent("collection.anki2")
-            is21 = false
-        }
-        
-        // No collection database found
-        if !fileManager.fileExists(atPath: dbPath.path) {
-            throw ApkgError.collectionDatabaseNotFound
-        }
-        
-        let db = try Connection(dbPath.absoluteString)
-        
-        let collections = try parseCollections(db, is21: is21)
+        let collections = try parseCollections(db, format: format)
         let notes = try parseNotes(db)
         let cards = try parseCards(db)
         let revlog = try parseRevlog(db)
-        let mediaMapping = try parseMediaMapping(workDir)
+        let mediaMapping = try parseMediaMapping(workDir, format: format)
         
         try fileManager.removeItem(at: workDir)
         
@@ -622,26 +835,10 @@ public struct AnkiPackage {
             // Do nothing
         }
         
-        try fileManager.unzipItem(at: fileUrl, to: workDir)
+        let (db, format) = try extractDb(fileUrl, workDir: workDir, fileManager: fileManager)
         
-        var dbPath = workDir.appendingPathComponent("collection.anki21")
-        var is21 = true
-        
-        // Check if an old version of the collection database exists
-        if !fileManager.fileExists(atPath: dbPath.path) {
-            dbPath = workDir.appendingPathComponent("collection.anki2")
-            is21 = false
-        }
-        
-        // No collection database found
-        if !fileManager.fileExists(atPath: dbPath.path) {
-            throw ApkgError.collectionDatabaseNotFound
-        }
-        
-        let db = try Connection(dbPath.absoluteString)
-        
-        let collections = try parseCollections(db, is21: is21)
-        let mediaMapping = try parseMediaMapping(workDir)
+        let collections = try parseCollections(db, format: format)
+        let mediaMapping = try parseMediaMapping(workDir, format: format)
         
         return try AnkiStreamReader(db: db, collections: collections, mediaMapping: mediaMapping)
     }
