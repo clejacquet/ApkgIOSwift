@@ -354,13 +354,15 @@ public struct AnkiPackage {
     public let cards: [Int64: AnkiCard]
     public let revlog: [Int64: AnkiRevlog]
     public let mediaMapping: [String: String]
+    public let mediaRoot: URL
     
-    public init(collections: [AnkiCollection], notes: [Int64 : AnkiNote], cards: [Int64 : AnkiCard], revlog: [Int64 : AnkiRevlog], mediaMapping: [String : String]) {
+    public init(collections: [AnkiCollection], notes: [Int64 : AnkiNote], cards: [Int64 : AnkiCard], revlog: [Int64 : AnkiRevlog], mediaMapping: [String: String], mediaRoot: URL) {
         self.collections = collections
         self.notes = notes
         self.cards = cards
         self.revlog = revlog
         self.mediaMapping = mediaMapping
+        self.mediaRoot = mediaRoot
     }
     
     static func parseNoteModelsOld(_ noteModelsJson: [String], is21: Bool) throws -> [[Int64: AnkiNoteModel]] {
@@ -657,10 +659,18 @@ public struct AnkiPackage {
         }
     }
     
-    static func parseMediaMapping(_ workDir: URL, format: AnkiPackageFormat) throws -> [String: String] {
+    static func processMedia(_ workDir: URL, mediaRoot: URL, format: AnkiPackageFormat, resolveNames: Bool) throws -> [String: String] {
         if format != .anki21b {
             let mediaData = try Data(contentsOf: workDir.appendingPathComponent("media"))
             let decoder = JSONDecoder()
+            
+            let mapping_str = try decoder.decode([String: String].self, from: mediaData)
+            
+            try mapping_str.forEach {
+                let filename = resolveNames ? $1 : $0
+                try FileManager.default.moveItem(at: workDir.appendingPathComponent($0), to: mediaRoot.appendingPathComponent(filename))
+            }
+            
             return try decoder.decode([String: String].self, from: mediaData)
         } else {
             try decompressZstdFile(atPath: workDir.appendingPathComponent("media"), toDestination: workDir.appendingPathComponent("media_dec"))
@@ -668,12 +678,16 @@ public struct AnkiPackage {
             
             let mediaEntries = try MediaEntries(serializedBytes: mediaData)
             
+            try mediaEntries.entries.enumerated().forEach {
+                let mediaKey = $1.hasLegacyZipFilename ? String($1.legacyZipFilename) : String($0)
+                let filename = resolveNames ? $1.name : mediaKey
+                
+                try decompressZstdFile(atPath: workDir.appendingPathComponent(mediaKey), toDestination: mediaRoot.appendingPathComponent(filename))
+            }
+            
             return Dictionary(uniqueKeysWithValues: mediaEntries.entries.enumerated().map {
-                if $1.hasLegacyZipFilename {
-                    return (String($1.legacyZipFilename), $1.name)
-                } else {
-                    return (String($0), $1.name)
-                }
+                let mediaKey = $1.hasLegacyZipFilename ? String($1.legacyZipFilename) : String($0)
+                return (mediaKey, $1.name)
             })
         }
     }
@@ -796,9 +810,10 @@ public struct AnkiPackage {
         }
     }
     
-    public static func parse(_ fileUrl: URL) throws -> AnkiPackage {
+    public static func parse(_ fileUrl: URL, _ resolveNames: Bool = true) throws -> AnkiPackage {
         let fileManager = FileManager()
-        let workDir = fileManager.temporaryDirectory.appendingPathComponent("apkg_contents")
+        let workDir = fileManager.temporaryDirectory.appendingPathComponent("apkg_" + fileUrl.lastPathComponent + "_work")
+        let mediaRoot = fileManager.temporaryDirectory.appendingPathComponent("apkg_" + fileUrl.lastPathComponent + "_media")
         
         // Erase any workdir remaining after a previous import
         do {
@@ -807,13 +822,30 @@ public struct AnkiPackage {
             // Do nothing
         }
         
-        let (db, format) = try extractDb(fileUrl, workDir: workDir, fileManager: fileManager)
+        do {
+            try fileManager.removeItem(at: mediaRoot)
+        } catch {
+            // Do nothing
+        }
         
-        let collections = try parseCollections(db, format: format)
-        let notes = try parseNotes(db)
-        let cards = try parseCards(db)
-        let revlog = try parseRevlog(db)
-        let mediaMapping = try parseMediaMapping(workDir, format: format)
+        try FileManager.default.createDirectory(at: mediaRoot, withIntermediateDirectories: false)
+        
+        let collections: [AnkiCollection]
+        let notes: [AnkiNote]
+        let cards: [AnkiCard]
+        let revlog: [AnkiRevlog]
+        let mediaMapping: [String: String]
+
+        do {
+            let (db, format) = try extractDb(fileUrl, workDir: workDir, fileManager: fileManager)
+            
+            collections = try parseCollections(db, format: format)
+            notes = try parseNotes(db)
+            cards = try parseCards(db)
+            revlog = try parseRevlog(db)
+            
+            mediaMapping = try processMedia(workDir, mediaRoot: mediaRoot, format: format, resolveNames: resolveNames)
+        }
         
         try fileManager.removeItem(at: workDir)
         
@@ -821,12 +853,14 @@ public struct AnkiPackage {
                            notes: ankiListToDict(notes),
                            cards: ankiListToDict(cards),
                            revlog: ankiListToDict(revlog),
-                           mediaMapping: mediaMapping)
+                           mediaMapping: mediaMapping,
+                           mediaRoot: mediaRoot)
     }
     
-    public static func streamReader(_ fileUrl: URL) throws -> AnkiStreamReader {
+    public static func streamReader(_ fileUrl: URL, _ resolveNames: Bool = true) throws -> AnkiStreamReader {
         let fileManager = FileManager()
-        let workDir = fileManager.temporaryDirectory.appendingPathComponent("apkg_contents")
+        let workDir = fileManager.temporaryDirectory.appendingPathComponent("apkg_" + fileUrl.lastPathComponent + "_work")
+        let mediaRoot = fileManager.temporaryDirectory.appendingPathComponent("apkg_" + fileUrl.lastPathComponent + "_media")
         
         // Erase any workdir remaining after a previous import
         do {
@@ -835,11 +869,19 @@ public struct AnkiPackage {
             // Do nothing
         }
         
+        do {
+            try fileManager.removeItem(at: mediaRoot)
+        } catch {
+            // Do nothing
+        }
+        
+        try FileManager.default.createDirectory(at: mediaRoot, withIntermediateDirectories: false)
+        
         let (db, format) = try extractDb(fileUrl, workDir: workDir, fileManager: fileManager)
         
         let collections = try parseCollections(db, format: format)
-        let mediaMapping = try parseMediaMapping(workDir, format: format)
+        let mediaMapping = try processMedia(workDir, mediaRoot: mediaRoot, format: format, resolveNames: resolveNames)
         
-        return try AnkiStreamReader(db: db, collections: collections, mediaMapping: mediaMapping)
+        return try AnkiStreamReader(db: db, collections: collections, workDir: workDir, mediaMapping: mediaMapping, mediaRoot: mediaRoot)
     }
 }
