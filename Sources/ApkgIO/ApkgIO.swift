@@ -798,7 +798,7 @@ public struct AnkiPackage {
     
     public static func parse(_ fileUrl: URL) throws -> AnkiPackage {
         let fileManager = FileManager()
-        let workDir = fileManager.temporaryDirectory.appendingPathComponent("apkg_contents")
+        let workDir = fileManager.temporaryDirectory.appendingPathComponent("apkg_" + fileUrl.lastPathComponent + "_work")
         
         // Erase any workdir remaining after a previous import
         do {
@@ -807,13 +807,21 @@ public struct AnkiPackage {
             // Do nothing
         }
         
-        let (db, format) = try extractDb(fileUrl, workDir: workDir, fileManager: fileManager)
+        let collections: [AnkiCollection]
+        let notes: [AnkiNote]
+        let cards: [AnkiCard]
+        let revlog: [AnkiRevlog]
+        let mediaMapping: [String: String]
         
-        let collections = try parseCollections(db, format: format)
-        let notes = try parseNotes(db)
-        let cards = try parseCards(db)
-        let revlog = try parseRevlog(db)
-        let mediaMapping = try parseMediaMapping(workDir, format: format)
+        do {
+            let (db, format) = try extractDb(fileUrl, workDir: workDir, fileManager: fileManager)
+        
+            collections = try parseCollections(db, format: format)
+            notes = try parseNotes(db)
+            cards = try parseCards(db)
+            revlog = try parseRevlog(db)
+            mediaMapping = try parseMediaMapping(workDir, format: format)
+        }
         
         try fileManager.removeItem(at: workDir)
         
@@ -826,7 +834,7 @@ public struct AnkiPackage {
     
     public static func streamReader(_ fileUrl: URL) throws -> AnkiStreamReader {
         let fileManager = FileManager()
-        let workDir = fileManager.temporaryDirectory.appendingPathComponent("apkg_contents")
+        let workDir = fileManager.temporaryDirectory.appendingPathComponent("apkg_" + fileUrl.lastPathComponent + "_work")
         
         // Erase any workdir remaining after a previous import
         do {
@@ -840,6 +848,6 @@ public struct AnkiPackage {
         let collections = try parseCollections(db, format: format)
         let mediaMapping = try parseMediaMapping(workDir, format: format)
         
-        return try AnkiStreamReader(db: db, collections: collections, mediaMapping: mediaMapping)
+        return try AnkiStreamReader(db: db, collections: collections, workDir: workDir, mediaMapping: mediaMapping)
     }
 }

@@ -4,12 +4,12 @@ import SQLite
 
 public class AnkiStreamReader {
     public let collections: [AnkiCollection]
-    public let mediaMapping: [String: String]
+    public let workDir: URL
     public let cardsCount: Int64
     public let notesCount: Int64
     public let revlogCount: Int64
     
-    private let db: Connection
+    private var db: Connection?
     private var cardsRead: Int64 = 0
     private var notesRead: Int64 = 0
     private var revlogRead: Int64 = 0
@@ -26,10 +26,10 @@ public class AnkiStreamReader {
         return revlogCount - revlogRead
     }}
     
-    init(db: Connection, collections: [AnkiCollection], mediaMapping: [String: String]) throws {
+    init(db: Connection, collections: [AnkiCollection], workDir: URL, mediaMapping: [String: String]) throws {
         self.db = db
         self.collections = collections
-        self.mediaMapping = mediaMapping
+        self.workDir = workDir
         
         let query = """
             SELECT
@@ -51,6 +51,16 @@ public class AnkiStreamReader {
         self.revlogCount = counts[2]
     }
     
+    deinit {
+        self.db = nil
+        
+        do {
+            try FileManager.default.removeItem(at: self.workDir)
+        } catch {
+            // Do nothing
+        }
+    }
+    
     public func readCards(_ count: Int64) throws -> [AnkiCard] {
         guard remainingCards > 0 else {
             return []
@@ -59,7 +69,7 @@ public class AnkiStreamReader {
         let offset = self.cardsRead
         let length = min(count, remainingCards)
         
-        let cardsBatch = try AnkiPackage.parseCards(self.db, length: length, offset: offset)
+        let cardsBatch = try AnkiPackage.parseCards(self.db!, length: length, offset: offset)
         
         self.cardsRead += length
         
@@ -74,7 +84,7 @@ public class AnkiStreamReader {
         let offset = self.notesRead
         let length = min(count, remainingNotes)
         
-        let notesBatch = try AnkiPackage.parseNotes(self.db, length: length, offset: offset)
+        let notesBatch = try AnkiPackage.parseNotes(self.db!, length: length, offset: offset)
         
         self.notesRead += length
         
@@ -90,7 +100,7 @@ public class AnkiStreamReader {
         let length = min(count, remainingRevlog)
         
         
-        let revlogBatch = try AnkiPackage.parseRevlog(self.db, length: length, offset: offset)
+        let revlogBatch = try AnkiPackage.parseRevlog(self.db!, length: length, offset: offset)
         
         self.revlogRead += length
         
