@@ -5,6 +5,8 @@ import SQLite
 public class AnkiStreamReader {
     public let collections: [AnkiCollection]
     public let workDir: URL
+    public let mediaRoot: URL
+    public let mediaMapping: [String: String]
     public let cardsCount: Int64
     public let notesCount: Int64
     public let revlogCount: Int64
@@ -26,10 +28,12 @@ public class AnkiStreamReader {
         return revlogCount - revlogRead
     }}
     
-    init(db: Connection, collections: [AnkiCollection], workDir: URL, mediaMapping: [String: String]) throws {
+    init(db: Connection, collections: [AnkiCollection], workDir: URL, mediaMapping: [String: String], mediaRoot: URL) throws {
         self.db = db
         self.collections = collections
         self.workDir = workDir
+        self.mediaRoot = mediaRoot
+        self.mediaMapping = mediaMapping
         
         let query = """
             SELECT
